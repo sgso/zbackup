@@ -17,16 +17,16 @@ using Encryption::BlockSize;
 
 InputStream::InputStream( char const * fileName, EncryptionKey const & key,
                           void const * iv_ ):
-  file( fileName, UnbufferedFile::ReadOnly ), filePos( 0 ), key( key ),
+  file( fileName, UnbufferedFile::ReadOnly ), filePos( 0 ),
   // Our buffer must be larger than BlockSize, as otherwise we won't be able
   // to handle PKCS#7 padding properly
   buffer( std::max( getPageSize(), ( unsigned ) BlockSize * 2 ) ),
-  fill( 0 ), remainder( 0 ), backedUp( false )
+  fill( 0 ), remainder( 0 ), backedUp( false ),
+  cipher( key, (unsigned char const *)iv_, 0 )
 {
   dPrintf( "Loading %s, hasKey: %s\n", fileName, key.hasKey() ? "true" : "false" );
-  if ( key.hasKey() )
+  if ( cipher.isCipher() )
   {
-    memcpy( iv, iv_, sizeof( iv ) );
     // Since we use padding, file size should be evenly dividable by the cipher
     // block size, and we should have at least one block
     UnbufferedFile::Offset size = file.size();
@@ -170,7 +170,7 @@ void InputStream::checkAdler32()
 
 void InputStream::consumeRandomIv()
 {
-  if ( key.hasKey() )
+  if ( cipher.isCipher() )
   {
     char iv[ Encryption::IvSize ];
     read( iv, sizeof( iv ) ); // read() can throw exceptions, Skip() can't
@@ -187,7 +187,7 @@ void InputStream::decrypt()
     // padding. That may happen the next time the function is called
     remainder = BlockSize;
     fill -= BlockSize;
-    doDecrypt();
+    cipher.update( (unsigned char const *)start, (unsigned char *)start, fill );
   }
   else
   {
@@ -197,53 +197,20 @@ void InputStream::decrypt()
     // Since we always have padding in the file and the last block is always
     // set apart when reading full buffers, we must have at least one block
     // to decrypt here
-    doDecrypt();
-
-    // Unpad the last block
-    if ( key.hasKey() )
-      fill -= BlockSize - Encryption::unpad( start + fill - BlockSize );
+    fill = cipher.finalize( (unsigned char const *)start, (unsigned char *)start, fill );
 
     // We have not left any remainder this time
     remainder = 0;
   }
 }
 
-void InputStream::doDecrypt()
-{
-  if ( !key.hasKey() )
-    return;
-
-  // Since we use padding, file size should be evenly dividable by the cipher's
-  // block size, and we should always have at least one block. When we get here,
-  // we would always get the proper fill value unless those characteristics are
-  // not met. We check for the same condition on construction, but the file
-  // size can change while we are reading it
-
-  // We don't throw an exception here as the interface we implement doesn't
-  // support them
-  CHECK( fill > 0 && !( fill % BlockSize ), "incorrect size of the encrypted "
-         "file - must be non-zero and in multiples of %u",
-         ( unsigned ) BlockSize );
-
-  // Copy the next iv prior to decrypting the data in place, as it will
-  // not be available afterwards
-  char newIv[ Encryption::IvSize ];
-  memcpy( newIv, Encryption::getNextDecryptionIv( start, fill ),
-          sizeof( newIv ) );
-  // Decrypt the data
-  Encryption::decrypt( iv, key.getKey(), start, start, fill );
-  // Copy the new iv
-  memcpy( iv, newIv, sizeof( iv ) );
-}
-
 OutputStream::OutputStream( char const * fileName, EncryptionKey const & key,
                             void const * iv_ ):
-  file( fileName, UnbufferedFile::WriteOnly ), filePos( 0 ), key( key ),
-  buffer( getPageSize() ), start( buffer.data() ), avail( 0 ), backedUp( false )
+  file( fileName, UnbufferedFile::WriteOnly ), filePos( 0 ),
+  buffer( getPageSize() ), start( buffer.data() ), avail( 0 ), backedUp( false ),
+  cipher( key, (unsigned char const *)iv_, 1)
 {
   dPrintf( "Saving %s, hasKey: %s\n", fileName, key.hasKey() ? "true" : "false" );
-  if ( key.hasKey() )
-    memcpy( iv, iv_, sizeof( iv ) );
 }
 
 bool OutputStream::Next( void ** data, int * size )
@@ -341,7 +308,7 @@ void OutputStream::writeAdler32()
 
 void OutputStream::writeRandomIv()
 {
-  if ( key.hasKey() )
+  if ( cipher.isCipher() )
   {
     char iv[ Encryption::IvSize ];
     Random::generatePseudo( iv, sizeof( iv ) );
@@ -351,16 +318,9 @@ void OutputStream::writeRandomIv()
 
 void OutputStream::encryptAndWrite( size_t bytes )
 {
-  if ( key.hasKey() )
-  {
-    CHECK( bytes > 0 && !( bytes % BlockSize ), "incorrect number of bytes to "
-           "encrypt and write - must be non-zero and in multiples of %u",
-           ( unsigned ) BlockSize );
-
-    void const * nextIv = Encryption::encrypt( iv, key.getKey(), buffer.data(),
-                                               buffer.data(), bytes );
-    memcpy( iv, nextIv, sizeof( iv ) );
-  }
+  bytes = cipher.update( (unsigned char const *)buffer.data(),
+                         (unsigned char *)buffer.data(),
+                         bytes );
 
   file.write( buffer.data(), bytes );
 }
@@ -377,18 +337,11 @@ OutputStream::~OutputStream()
     start = buffer.data();
   }
 
-  size_t bytesToWrite = start - buffer.data();
+  size_t bytes = cipher.finalize( (unsigned char const *)buffer.data(),
+                                  (unsigned char *)buffer.data(),
+                                  start - buffer.data());
 
-  if ( key.hasKey() )
-  {
-    // Perform padding
-    size_t remainderSize = bytesToWrite % BlockSize;
-
-    Encryption::pad( start - remainderSize, remainderSize );
-    bytesToWrite += BlockSize - remainderSize;
-  }
-
-  encryptAndWrite( bytesToWrite );
+  file.write( buffer.data(), bytes );
 }
 
 }

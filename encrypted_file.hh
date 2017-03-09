@@ -20,11 +20,7 @@
 /// Google's ZeroCopyStream implementations which read and write files encrypted
 /// with our encryption mechanism. They also calculate adler32 of all file
 /// content and write/check it at the end.
-/// Encryption-wise we implement AES-128 in CBC mode with PKCS#7 padding. We
-/// don't use EVP for this currently - everyone is welcome to change this, and
-/// to add support for arbitrary ciphers, key lengths and modes of operations as
-/// well. When no encryption key is set, no encryption or padding is done, but
-/// everything else works the same way otherwise
+/// Encryption-wise we implement AES-128 in CBC mode with PKCS#7 padding.
 namespace EncryptedFile {
 
 DEF_EX( Ex, "Encrypted file exception", std::exception )
@@ -67,8 +63,7 @@ public:
 private:
   UnbufferedFile file;
   UnbufferedFile::Offset filePos;
-  EncryptionKey const & key;
-  char iv[ Encryption::IvSize ];
+  Encryption::Cipher cipher;
   std::vector< char > buffer;
   char * start; /// Points to the start of the data currently held in buffer
   size_t fill; /// Number of bytes held in buffer
@@ -117,8 +112,7 @@ public:
 private:
   UnbufferedFile file;
   UnbufferedFile::Offset filePos;
-  EncryptionKey const & key;
-  char iv[ Encryption::IvSize ];
+  Encryption::Cipher cipher;
   std::vector< char > buffer;
   char * start; /// Points to the start of the area currently available for
                 /// writing to in buffer
